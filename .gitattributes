@@ -1,0 +1,6 @@
+# Keep consistent line endings in repo
+* text=auto eol=lf
+
+# Optional: Windows scripts as CRLF
+*.bat text eol=crlf
+*.ps1 text eol=crlf
