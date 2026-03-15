@@ -1,6 +1,5 @@
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useState, useEffect } from "react";
 import { api } from "../api.js";
-import UserSelect from "../components/UserSelect.jsx";
 
 function isImageFilename(name) {
   return /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(name || "");
@@ -10,9 +9,151 @@ function normalize(s) {
   return (s || "").toLowerCase();
 }
 
-export default function Vault() {
-  const [ownerId, setOwnerId] = useState(null);
+function formatBytes(bytes) {
+  const n = Number(bytes);
+  if (!Number.isFinite(n) || n < 0) return String(bytes);
+  if (n < 1024) return `${n} B`;
+  const kb = n / 1024;
+  if (kb < 1024) return `${kb.toFixed(1)} KB`;
+  const mb = kb / 1024;
+  if (mb < 1024) return `${mb.toFixed(1)} MB`;
+  const gb = mb / 1024;
+  return `${gb.toFixed(2)} GB`;
+}
 
+function formatDate(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString();
+}
+
+function PhotoRow({ photo, busy, onDeleted }) {
+  const [token, setToken] = useState("");
+  const [tokErr, setTokErr] = useState("");
+  const [deleting, setDeleting] = useState(false);
+  const [rowErr, setRowErr] = useState("");
+
+  const img = isImageFilename(photo.original_name);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadToken() {
+      setTokErr("");
+      setToken("");
+      try {
+        const res = await api.issuePhotoToken(photo.id);
+        if (cancelled) return;
+        setToken(String(res.token || ""));
+      } catch (e) {
+        if (cancelled) return;
+        setTokErr(String(e?.message || e || "Token error"));
+      }
+    }
+
+    loadToken();
+    return () => {
+      cancelled = true;
+    };
+  }, [photo.id]);
+
+  async function doDelete() {
+    setRowErr("");
+    const ok = window.confirm(
+      `Delete "${photo.original_name}"?\n\nThis cannot be undone.`,
+    );
+    if (!ok) return;
+
+    setDeleting(true);
+    try {
+      await api.deletePhoto(photo.id);
+      onDeleted();
+    } catch (e) {
+      setRowErr(String(e?.message || e || "Delete failed"));
+    } finally {
+      setDeleting(false);
+    }
+  }
+
+  const viewUrl = api.photoViewUrl(photo.id, token);
+  const downloadUrl = api.photoDownloadUrl(photo.id, token);
+
+  return (
+    <div className="item">
+      <div className="row" style={{ alignItems: "flex-start" }}>
+        {img ? (
+          <div style={{ width: "min(320px, 100%)" }}>
+            <img
+              src={viewUrl}
+              alt={photo.original_name}
+              style={{
+                maxWidth: "100%",
+                borderRadius: 12,
+                border: "1px solid var(--border)",
+                background: "rgba(255,255,255,0.02)",
+              }}
+              loading="lazy"
+            />
+          </div>
+        ) : null}
+
+        <div style={{ flex: 1, minWidth: 240 }}>
+          <div style={{ fontWeight: 800 }}>{photo.original_name}</div>
+          <div className="small">
+            id={photo.id} • {formatBytes(photo.size_bytes)} •{" "}
+            {formatDate(photo.created_at)}
+          </div>
+
+          <div
+            style={{
+              marginTop: 10,
+              display: "flex",
+              gap: 12,
+              flexWrap: "wrap",
+              alignItems: "center",
+            }}
+          >
+            <a href={downloadUrl} target="_blank" rel="noreferrer">
+              Download
+            </a>
+            {img ? (
+              <a href={viewUrl} target="_blank" rel="noreferrer">
+                Open preview
+              </a>
+            ) : null}
+
+            <span style={{ flex: 1 }} />
+
+            <button
+              type="button"
+              className="btn"
+              onClick={doDelete}
+              disabled={busy || deleting}
+              aria-disabled={busy || deleting}
+            >
+              {deleting ? "Deleting…" : "Delete"}
+            </button>
+          </div>
+
+          {tokErr ? (
+            <div className="small" role="alert" style={{ marginTop: 8 }}>
+              {tokErr}
+            </div>
+          ) : null}
+
+          {rowErr ? (
+            <div className="small" role="alert" style={{ marginTop: 8 }}>
+              {rowErr}
+            </div>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export default function Vault({ me }) {
   const [photos, setPhotos] = useState([]);
   const [file, setFile] = useState(null);
 
@@ -22,16 +163,15 @@ export default function Vault() {
   const [search, setSearch] = useState("");
   const [sortBy, setSortBy] = useState("newest");
   const [filterMode, setFilterMode] = useState("all");
-  const [thumbWidth, setThumbWidth] = useState(220);
 
-  const canUse = useMemo(() => !!ownerId, [ownerId]);
+  const canUse = useMemo(() => !!me, [me]);
 
   async function refresh() {
     if (!canUse) return;
     setErr("");
     setBusy(true);
     try {
-      const list = await api.listPhotos(ownerId);
+      const list = await api.listPhotos();
       setPhotos(Array.isArray(list) ? list : []);
     } catch (e) {
       setErr(String(e?.message || e || "Failed to load files"));
@@ -40,12 +180,24 @@ export default function Vault() {
     }
   }
 
+  useEffect(() => {
+    // Auto-load the vault whenever you log in / switch users.
+    if (!me) {
+      setPhotos([]);
+      setErr("");
+      setBusy(false);
+      return;
+    }
+    refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [me?.id]);
+
   async function upload() {
     if (!canUse || !file) return;
     setErr("");
     setBusy(true);
     try {
-      await api.uploadPhoto(file, ownerId);
+      await api.uploadPhoto(file);
       setFile(null);
       await refresh();
     } catch (e) {
@@ -91,42 +243,16 @@ export default function Vault() {
   const searchId = "vaultSearch";
   const sortId = "vaultSort";
   const filterId = "vaultFilter";
-  const sliderId = "vaultThumb";
 
   return (
     <section className="card" aria-label="Vault">
       <h2 className="h2">Vault</h2>
 
-      <div className="card compact" style={{ marginTop: 12 }}>
-        <h3 className="h3">Owner</h3>
-        <UserSelect
-          label="Select owner"
-          selectId="vaultOwnerSelect"
-          valueId={ownerId}
-          onChangeId={(id) => {
-            setOwnerId(id);
-            setPhotos([]);
-            setErr("");
-          }}
-        />
-
-        {!canUse ? (
-          <div className="notice" style={{ marginTop: 10 }}>
-            Select a user to view and upload files.
-          </div>
-        ) : null}
-
-        <div className="row" style={{ marginTop: 10, alignItems: "center" }}>
-          <button
-            type="button"
-            className="btn"
-            onClick={refresh}
-            disabled={!canUse || busy}
-          >
-            {busy ? "Working…" : "Refresh"}
-          </button>
+      {!me ? (
+        <div className="notice" style={{ marginTop: 10 }}>
+          Log in to use Vault.
         </div>
-      </div>
+      ) : null}
 
       <div
         className="card compact"
@@ -155,15 +281,10 @@ export default function Vault() {
             Upload
           </button>
         </div>
-
-        <div className="small" style={{ marginTop: 8 }}>
-          Uploaded files are stored on the hub server and associated to the
-          selected owner.
-        </div>
       </div>
 
       <div className="card compact" style={{ marginTop: 12 }}>
-        <div className="row" style={{ alignItems: "center" }}>
+        <div className="row" style={{ alignItems: "end" }}>
           <div style={{ flex: 1, minWidth: 240 }}>
             <label className="label" htmlFor={searchId}>
               Search files
@@ -213,31 +334,9 @@ export default function Vault() {
               <option value="nonimages">Non-images only</option>
             </select>
           </div>
-        </div>
-
-        <div className="row" style={{ marginTop: 10, alignItems: "center" }}>
-          <label
-            className="label"
-            htmlFor={sliderId}
-            style={{ marginBottom: 0 }}
-          >
-            Preview size
-          </label>
-          <input
-            id={sliderId}
-            type="range"
-            min="140"
-            max="420"
-            step="10"
-            value={thumbWidth}
-            onChange={(e) => setThumbWidth(Number(e.target.value))}
-            disabled={!canUse}
-          />
-          <div className="small">{thumbWidth}px</div>
 
           <div
-            className="small"
-            style={{ marginLeft: "auto" }}
+            className="small toolbarMeta"
             aria-live="polite"
           >
             Showing {view.length} of {photos.length}
@@ -246,66 +345,13 @@ export default function Vault() {
       </div>
 
       <div className="card compact" style={{ marginTop: 12 }}>
-        {!canUse ? (
-          <div className="small">(select an owner to view files)</div>
-        ) : view.length === 0 ? (
+        {view.length === 0 ? (
           <div className="small">(no files match)</div>
         ) : (
           <div className="list">
-            {view.map((p) => {
-              const img = isImageFilename(p.original_name);
-              const downloadUrl = api.photoDownloadUrl(p.id);
-
-              // We don't have a "view" endpoint in the hub; download will still open in a new tab for images.
-              return (
-                <div className="item" key={p.id}>
-                  <div
-                    style={{
-                      display: "flex",
-                      gap: 12,
-                      flexWrap: "wrap",
-                      alignItems: "flex-start",
-                    }}
-                  >
-                    {img ? (
-                      <div style={{ width: thumbWidth }}>
-                        <img
-                          src={downloadUrl}
-                          alt={p.original_name}
-                          style={{
-                            maxWidth: "100%",
-                            borderRadius: 12,
-                            border: "1px solid var(--border)",
-                            background: "rgba(255,255,255,0.02)",
-                          }}
-                          loading="lazy"
-                        />
-                      </div>
-                    ) : null}
-
-                    <div style={{ flex: 1, minWidth: 240 }}>
-                      <div style={{ fontWeight: 800 }}>{p.original_name}</div>
-                      <div className="small">
-                        id={p.id} • {p.size_bytes} bytes • {p.created_at}
-                      </div>
-
-                      <div
-                        style={{
-                          marginTop: 10,
-                          display: "flex",
-                          gap: 12,
-                          flexWrap: "wrap",
-                        }}
-                      >
-                        <a href={downloadUrl} target="_blank" rel="noreferrer">
-                          Download / open
-                        </a>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
+            {view.map((p) => (
+              <PhotoRow key={p.id} photo={p} busy={busy} onDeleted={refresh} />
+            ))}
           </div>
         )}
       </div>
