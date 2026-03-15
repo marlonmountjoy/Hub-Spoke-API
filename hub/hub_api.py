@@ -100,7 +100,7 @@ def extract_api_key() -> str | None:
     """Extract an *API key* (public gateway credential).
 
     IMPORTANT: API keys come from X-API-Key header or ?api_key= query param.
-    We intentionally do NOT treat Authorization: Bearer ... as 
+    We intentionally do NOT treat Authorization: Bearer ... as
     an API key.
     """
     h = request.headers.get("X-API-Key")
@@ -282,8 +282,13 @@ class User(db.Model):
     __tablename__ = "users"
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(120), unique=True, nullable=False)
-    password_hash = db.Column(db.String(255), nullable=False)
-    created_at = db.Column(db.String(32), nullable=False)
+
+    # legacy DBs may still contain this old required column
+    api_key_hash = db.Column(db.String(64), nullable=True)
+
+    # modern auth fields
+    password_hash = db.Column(db.String(255), nullable=True)
+    created_at = db.Column(db.String(32), nullable=True)
 
 class ApiKey(db.Model):
     __tablename__ = "api_keys"
@@ -417,6 +422,12 @@ def ensure_schema():
     """
 
     db.create_all()
+
+    # users
+    _add_column_if_missing("users", "username", "VARCHAR(120)")
+    _add_column_if_missing("users", "api_key_hash", "VARCHAR(64)")
+    _add_column_if_missing("users", "password_hash", "VARCHAR(255)")
+    _add_column_if_missing("users", "created_at", "VARCHAR(32)")
 
     # Additive migrations only (safe):
     # api_keys
@@ -636,6 +647,7 @@ class AuthRegister(Resource):
 
         u = User(
             username=username,
+            api_key_hash=hash_key(secrets.token_urlsafe(32)),
             password_hash=generate_password_hash(password),
             created_at=now_iso_utc(),
         )
@@ -651,7 +663,7 @@ class AuthLogin(Resource):
         password = args.get("password") or ""
 
         u = User.query.filter_by(username=username).first()
-        if u is None or not check_password_hash(u.password_hash, password):
+        if u is None or not u.password_hash or not check_password_hash(u.password_hash, password):
             abort(401, message="Invalid username or password")
 
         token = make_access_token(u.id)
@@ -671,7 +683,7 @@ class AuthMe(Resource):
         if "\x00" in password:
             abort(400, message="password contains unsupported characters")
 
-        if not check_password_hash(me.password_hash, password):
+        if not me.password_hash or not check_password_hash(me.password_hash, password):
             abort(401, message="Invalid password")
 
         owned_photos = Photo.query.filter_by(owner_id=me.id).all()
